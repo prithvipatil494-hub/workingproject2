@@ -93,7 +93,9 @@ import java.util.*
 import kotlin.math.*
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-
+const val WEB_CLIENT_ID = 
+const val MAPBOX_TOKEN  = 
+const val BACKEND       = "
 const val MAX_FRIENDS   = 4
 
 // ─── SharedPreferences keys ───────────────────────────────────────────────────
