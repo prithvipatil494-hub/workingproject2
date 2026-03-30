@@ -93,9 +93,7 @@ import java.util.*
 import kotlin.math.*
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-const val WEB_CLIENT_ID = 
-const val MAPBOX_TOKEN  = 
-const val BACKEND       = 
+
 const val MAX_FRIENDS   = 4
 
 // ─── SharedPreferences keys ───────────────────────────────────────────────────
@@ -524,12 +522,10 @@ fun MainApp(
 
     var savedFriends by remember { mutableStateOf<List<SavedFriend>>(emptyList()) }
 
-    // ── FIX 1: Use a version counter to force avatar recomposition ─────────────
-    // This ensures the ProfileTab avatar re-renders immediately after upload.
     var myAvatarBase64 by remember {
         mutableStateOf(prefs.getString(PREF_PROFILE_PIC, "") ?: "")
     }
-    var myAvatarVersion by remember { mutableStateOf(0) }  // bump after each upload
+    var myAvatarVersion by remember { mutableStateOf(0) }
 
     val friendAvatars = remember { mutableStateMapOf<String, String>() }
 
@@ -578,13 +574,11 @@ fun MainApp(
             val b64 = uriToBase64(ctx, uri, 256) ?: return@launch
             withContext(Dispatchers.Main) {
                 myAvatarBase64 = b64
-                myAvatarVersion++  // FIX 1: Force recomposition of all avatar composables
+                myAvatarVersion++
             }
             prefs.edit().putString(PREF_PROFILE_PIC, b64).apply()
-            // FIX 1: Upload to server so others see updated avatar
             val result = httpPost("/api/user/${user.uid}/avatar", JSONObject().apply { put("avatarBase64", b64) })
             if (result == null) {
-                // Retry once on failure
                 kotlinx.coroutines.delay(2000)
                 httpPost("/api/user/${user.uid}/avatar", JSONObject().apply { put("avatarBase64", b64) })
             }
@@ -640,7 +634,6 @@ fun MainApp(
                 prefs.edit().putString(PREF_TRACK_ID, remoteTrackId).putString(PREF_UID, user.uid).putString(PREF_DISPLAY_NAME, user.displayName ?: "").apply()
 
                 val remoteAvatar = userDoc.optString("avatarBase64", "")
-                // FIX 1: Always prefer local avatar if it was set; sync from remote only if local is blank
                 if (remoteAvatar.isNotBlank() && myAvatarBase64.isBlank()) {
                     withContext(Dispatchers.Main) {
                         myAvatarBase64 = remoteAvatar
@@ -680,16 +673,10 @@ fun MainApp(
         }
     }
 
-    // ── FIX 2: Poll who is tracking me and auto-add them to savedFriends ──────
-    // Every 15 seconds, check if any new users have added my trackId to their friends list.
-    // The backend doesn't have a dedicated "who tracks me" endpoint, so we use a workaround:
-    // We check conversations — if someone I haven't saved messaged me, we fetch their profile.
-    // Also periodically re-fetch our own user doc to pick up remotely added friends.
     LaunchedEffect(trackIdReady, myTrackId) {
         if (!trackIdReady) return@LaunchedEffect
         while (true) {
             withContext(Dispatchers.IO) {
-                // Re-fetch own user doc to pick up any new remote friends
                 val userDoc = httpGet("/api/user/${user.uid}") ?: return@withContext
                 val remoteFriends = userDoc.optJSONArray("friends")?.let { arr ->
                     (0 until arr.length()).map { arr.getString(it) }
@@ -703,7 +690,6 @@ fun MainApp(
                     }
                 }
 
-                // Also fetch profiles for any tracked IDs we don't have saved yet
                 val idsNeedingProfile = trackedIds.toList().filter { id ->
                     val existing = savedFriends.find { it.trackId == id }
                     existing == null || existing.displayName.isBlank()
@@ -727,7 +713,7 @@ fun MainApp(
                     }
                 }
 
-                // FIX 2: Refresh friend avatars from server to catch their profile pic updates
+                // Refresh friend avatars from server to catch profile pic updates
                 trackedIds.toList().forEach { id ->
                     val j = httpGet("/api/user/by-trackid/$id") ?: return@forEach
                     val remoteAvatar = j.optString("avatarBase64", "")
@@ -736,7 +722,6 @@ fun MainApp(
                         if (remoteAvatar != currentAvatar) {
                             withContext(Dispatchers.Main) {
                                 friendAvatars[id] = remoteAvatar
-                                // Update in savedFriends too
                                 val merged = savedFriends.toMutableList()
                                 val idx = merged.indexOfFirst { it.trackId == id }
                                 if (idx >= 0) merged[idx] = merged[idx].copy(avatarBase64 = remoteAvatar)
@@ -977,6 +962,7 @@ fun MainApp(
             myName             = user.displayName ?: myTrackId,
             myAvatarBase64     = myAvatarBase64,
             friendAvatars      = friendAvatars,
+            savedFriends       = savedFriends,
             trackedIds         = trackedIds.toList(),
             initialChatTrackId = chatWithTrackId,
             initialChatName    = chatWithName,
@@ -1010,9 +996,9 @@ fun MainApp(
                     pathPoints = pathPoints, isRecording = isRecording,
                     trackedIds = trackedIds, friendLocations = friendLocations,
                     myAvatarBase64 = myAvatarBase64,
-                    myAvatarVersion = myAvatarVersion,  // FIX 1: pass version to force recompose
+                    myAvatarVersion = myAvatarVersion,
                     friendAvatars = friendAvatars,
-                    savedFriends = savedFriends,         // FIX 4: pass savedFriends for map popups
+                    savedFriends = savedFriends,
                     onStartRecording = onStartRecording, onStopRecording = onStopRecording,
                     bgTrackingOn = bgTrackingOn,
                     onStartBgTracking = { startBgTracking() }, onStopBgTracking = { stopBgTracking() },
@@ -1022,6 +1008,7 @@ fun MainApp(
                 NavTab.FRIENDS -> FriendsTab(
                     savedFriends = savedFriends, trackedIds = trackedIds.toList(),
                     friendLocations = friendLocations,
+                    friendAvatars = friendAvatars,
                     onShowFriendDialog = { showFriendDialog = true },
                     onToggleTrack = { toggleTrackSavedFriend(it) },
                     onRemoveSavedFriend = { removeSavedFriend(it) },
@@ -1033,6 +1020,7 @@ fun MainApp(
                     myName         = user.displayName ?: myTrackId,
                     myAvatarBase64 = myAvatarBase64,
                     friendAvatars  = friendAvatars,
+                    savedFriends   = savedFriends,
                     trackedIds     = trackedIds.toList(),
                     onBack         = { activeTab = NavTab.MAP }
                 )
@@ -1041,7 +1029,7 @@ fun MainApp(
                     myLocation = myLocation, isConnected = isConnected, gpsAvailable = gpsAvailable,
                     bgTrackingOn = bgTrackingOn,
                     myAvatarBase64 = myAvatarBase64,
-                    myAvatarVersion = myAvatarVersion,  // FIX 1
+                    myAvatarVersion = myAvatarVersion,
                     onPickProfilePicture = { imagePickerLauncher.launch("image/*") },
                     onStartBgTracking = { startBgTracking() }, onStopBgTracking = { stopBgTracking() },
                     onStartRecording = onStartRecording, onStopRecording = onStopRecording,
@@ -1119,7 +1107,7 @@ private fun NavItem(emoji: String, label: String, isSelected: Boolean, onClick: 
     }
 }
 
-// ─── Avatar composable — FIX 1: key on avatarVersion to force full recompose ──
+// ─── Avatar composable ────────────────────────────────────────────────────────
 @Composable
 fun AvatarCircle(
     base64: String,
@@ -1127,15 +1115,17 @@ fun AvatarCircle(
     size: Int = 56,
     isTracking: Boolean = false,
     isLive: Boolean = false,
-    avatarVersion: Int = 0  // FIX 1: bump this to force Compose to re-decode the bitmap
+    avatarVersion: Int = 0,
+    // NEW: option to use square (rounded) instead of circle
+    squareShape: Boolean = false
 ) {
-    // FIX 1: key on both base64 AND avatarVersion so remember() re-runs when version changes
     val bitmap = remember(base64, avatarVersion) { base64ToBitmap(base64) }
+    val shape = if (squareShape) RoundedCornerShape(12.dp) else CircleShape
     Box(
-        Modifier.size(size.dp).clip(CircleShape)
+        Modifier.size(size.dp).clip(shape)
             .background(if (isTracking) Brush.linearGradient(listOf(EmeraldDeep, EmeraldGreen))
             else Brush.linearGradient(listOf(DarkCardAlt, DarkBorderLight)))
-            .border(2.dp, if (isLive) GreenOnline.copy(alpha = 0.6f) else Color.Transparent, CircleShape),
+            .border(2.dp, if (isLive) GreenOnline.copy(alpha = 0.6f) else Color.Transparent, shape),
         Alignment.Center
     ) {
         if (bitmap != null) {
@@ -1143,7 +1133,7 @@ fun AvatarCircle(
                 bitmap = bitmap.asImageBitmap(),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().clip(CircleShape)
+                modifier = Modifier.fillMaxSize().clip(shape)
             )
         } else {
             Text(fallbackInitial, fontSize = (size * 0.38f).sp, fontWeight = FontWeight.ExtraBold,
@@ -1152,7 +1142,7 @@ fun AvatarCircle(
     }
 }
 
-// ─── Map Screen — FIX 4: Friend popup card with photo always visible ──────────
+// ─── Map Screen ───────────────────────────────────────────────────────────────
 @Composable
 fun MapScreen(
     myLocation: LocationData?, myTrackId: String, trackIdReady: Boolean,
@@ -1163,7 +1153,7 @@ fun MapScreen(
     myAvatarBase64: String = "",
     myAvatarVersion: Int = 0,
     friendAvatars: Map<String, String> = emptyMap(),
-    savedFriends: List<SavedFriend> = emptyList(),  // FIX 4
+    savedFriends: List<SavedFriend> = emptyList(),
     bgTrackingOn: Boolean,
     onStartRecording: () -> Unit, onStopRecording: () -> Unit,
     onStartBgTracking: () -> Unit, onStopBgTracking: () -> Unit,
@@ -1206,11 +1196,13 @@ fun MapScreen(
                 if (i % 5 == 0) CircleAnnotation(point = pt, circleRadius = 4.0, circleColorString = "#00FF88", circleStrokeWidth = 1.5, circleStrokeColorString = "#0A0F0A")
             }
 
+            // Friend dots on the map
             trackedIds.forEachIndexed { slot, id ->
                 val loc = friendLocations[id] ?: return@forEachIndexed
                 val hex = FriendColorHex[slot % FriendColorHex.size]
-                CircleAnnotation(point = loc.point, circleRadius = 22.0, circleColorString = hex, circleOpacity = 0.18, circleStrokeWidth = 0.0)
-                CircleAnnotation(point = loc.point, circleRadius = 11.0, circleColorString = hex,
+                CircleAnnotation(point = loc.point, circleRadius = 26.0, circleColorString = hex,
+                    circleOpacity = 0.18, circleStrokeWidth = 0.0)
+                CircleAnnotation(point = loc.point, circleRadius = 13.0, circleColorString = hex,
                     circleStrokeWidth = 3.0, circleStrokeColorString = "#0A0F0A",
                     circleOpacity = if (loc.isRecent) 1.0 else 0.5)
             }
@@ -1222,9 +1214,13 @@ fun MapScreen(
             }
         }
 
-        // ── Top bar ────────────────────────────────────────────────────────────
-        Row(Modifier.align(Alignment.TopCenter).padding(top = 16.dp, start = 16.dp, end = 16.dp).fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        // ── Top bar: status pill (left) + theme toggle (right) ─────────────────
+        Row(
+            Modifier.align(Alignment.TopCenter).padding(top = 16.dp, start = 16.dp, end = 16.dp).fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Status pill
             Row(modifier = Modifier.clip(RoundedCornerShape(20.dp)).background(overlayBg)
                 .border(1.dp, overlayBorder, RoundedCornerShape(20.dp)).padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1236,6 +1232,7 @@ fun MapScreen(
                     Text("±${myLocation.accuracy.toInt()}m", fontSize = 12.sp, color = color, fontWeight = FontWeight.Bold)
                 }
             }
+            // Theme toggle
             Row(modifier = Modifier.clip(RoundedCornerShape(20.dp)).background(overlayBg)
                 .border(1.dp, overlayBorder, RoundedCornerShape(20.dp)).padding(4.dp),
                 verticalAlignment = Alignment.CenterVertically) {
@@ -1254,6 +1251,7 @@ fun MapScreen(
             }
         }
 
+        // ── Recording indicator ────────────────────────────────────────────────
         if (isRecording) {
             Row(Modifier.align(Alignment.TopCenter).padding(top = 60.dp)
                 .clip(RoundedCornerShape(20.dp)).background(RedRecord.copy(alpha = 0.15f))
@@ -1264,34 +1262,37 @@ fun MapScreen(
             }
         }
 
-        // ── FIX 4: Friend popup cards — persistent, always visible ────────────
-        // Rendered as a scrollable row at the top-right area so they don't obscure the map centre.
-        // Each tracked friend with a known location gets a compact card.
+        // ── FRIEND AVATAR SQUARES — top left, below top bar ───────────────────
+        // Shows square avatar cards stacked vertically on the left side
         if (trackedIds.isNotEmpty()) {
             Column(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(top = 72.dp, start = 16.dp),
+                    .padding(
+                        start = 16.dp,
+                        top = if (isRecording) 100.dp else 72.dp  // below top bar (+recording pill if active)
+                    ),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 trackedIds.forEachIndexed { slot, id ->
-                    val loc = friendLocations[id]
+                    val loc           = friendLocations[id]
                     val friendProfile = savedFriends.find { it.trackId == id }
-                    val friendColor = FriendColors[slot % FriendColors.size]
-                    val friendName = friendProfile?.displayName?.ifBlank { id } ?: id
-                    val avatarB64 = friendAvatars[id] ?: friendProfile?.avatarBase64 ?: ""
-                    FriendMapPopupCard(
-                        trackId      = id,
-                        name         = friendName,
-                        avatarBase64 = avatarB64,
-                        color        = friendColor,
-                        isLive       = loc?.isRecent == true,
-                        speedKmh     = loc?.speedKmh ?: 0f,
-                        overlayBg    = overlayBg,
+                    val friendColor   = FriendColors[slot % FriendColors.size]
+                    val friendName    = friendProfile?.displayName?.ifBlank { id } ?: id
+                    val avatarB64     = friendAvatars[id] ?: friendProfile?.avatarBase64 ?: ""
+                    val isLive        = loc?.isRecent == true
+
+                    FriendMapSquareCard(
+                        name          = friendName,
+                        avatarBase64  = avatarB64,
+                        color         = friendColor,
+                        isLive        = isLive,
+                        speedKmh      = loc?.speedKmh ?: 0f,
+                        overlayBg     = overlayBg,
                         overlayBorder = overlayBorder,
-                        overlayText  = overlayText,
-                        overlayMuted = overlayMuted,
-                        onTap        = {
+                        overlayText   = overlayText,
+                        overlayMuted  = overlayMuted,
+                        onTap         = {
                             loc?.let {
                                 viewport.flyTo(CameraOptions.Builder().center(it.point).zoom(17.0).build())
                             }
@@ -1314,10 +1315,13 @@ fun MapScreen(
             }
         }
 
+        // ── Bottom left: my location coords ───────────────────────────────────
         myLocation?.let { loc ->
-            Surface(modifier = Modifier.align(Alignment.BottomStart).padding(start = 16.dp, bottom = 16.dp),
+            Surface(
+                modifier = Modifier.align(Alignment.BottomStart).padding(start = 16.dp, bottom = 16.dp),
                 shape = RoundedCornerShape(16.dp), color = overlayBg,
-                border = androidx.compose.foundation.BorderStroke(1.dp, overlayBorder)) {
+                border = androidx.compose.foundation.BorderStroke(1.dp, overlayBorder)
+            ) {
                 Column(Modifier.padding(12.dp)) {
                     Text("MY LOCATION", fontSize = 9.sp, color = overlayMuted, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.sp)
                     Spacer(Modifier.height(4.dp))
@@ -1329,10 +1333,10 @@ fun MapScreen(
     }
 }
 
-// ─── FIX 4: Friend popup card composable for map ──────────────────────────────
+// ─── Friend map SQUARE card — top-left avatar stack ──────────────────────────
+// Replaces the old horizontal pill chips at the bottom with vertical square cards
 @Composable
-fun FriendMapPopupCard(
-    trackId: String,
+fun FriendMapSquareCard(
     name: String,
     avatarBase64: String,
     color: Color,
@@ -1344,99 +1348,169 @@ fun FriendMapPopupCard(
     overlayMuted: Color,
     onTap: () -> Unit
 ) {
-    val bitmap = remember(avatarBase64) { base64ToBitmap(avatarBase64) }
-    val shortName = name.split(" ").first().take(12)
+    val bitmap    = remember(avatarBase64) { base64ToBitmap(avatarBase64) }
+    val shortName = name.split(" ").first().take(8)
 
     Surface(
-        modifier = Modifier
-            .width(160.dp)
-            .clickable { onTap() },
-        shape = RoundedCornerShape(14.dp),
-        color = overlayBg,
-        border = androidx.compose.foundation.BorderStroke(
+        modifier        = Modifier.clickable { onTap() }.width(72.dp),
+        shape           = RoundedCornerShape(14.dp),
+        color           = overlayBg,
+        shadowElevation = 6.dp,
+        border          = androidx.compose.foundation.BorderStroke(
             1.5.dp,
-            if (isLive) color.copy(alpha = 0.7f) else overlayBorder
+            if (isLive) color.copy(alpha = 0.85f) else overlayBorder
         )
     ) {
-        Row(
-            Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Column(
+            modifier            = Modifier.padding(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
-            // Avatar or colored initial circle
+            // Square avatar with live ring
             Box(
-                Modifier
-                    .size(36.dp)
-                    .clip(CircleShape)
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(10.dp))
                     .background(
-                    brush = if (bitmap != null) {
-                        Brush.linearGradient(
-                            listOf(color.copy(alpha = 0.15f), color.copy(alpha = 0.15f))
-                        )
-                    } else {
-                        Brush.linearGradient(
-                            listOf(color.copy(alpha = 0.7f), color)
-                        )
-                    }
-                )
-                    .border(1.5.dp, color.copy(alpha = 0.6f), CircleShape),
-                Alignment.Center
+                        if (bitmap != null)
+                            Brush.linearGradient(listOf(color.copy(0.15f), color.copy(0.15f)))
+                        else
+                            Brush.linearGradient(listOf(color.copy(0.7f), color))
+                    )
+                    .border(
+                        width = if (isLive) 2.dp else 1.5.dp,
+                        color = if (isLive) color else color.copy(alpha = 0.5f),
+                        shape = RoundedCornerShape(10.dp)
+                    ),
+                contentAlignment = Alignment.Center
             ) {
                 if (bitmap != null) {
                     androidx.compose.foundation.Image(
-                        bitmap = bitmap.asImageBitmap(),
+                        bitmap             = bitmap.asImageBitmap(),
                         contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize().clip(CircleShape)
+                        contentScale       = ContentScale.Crop,
+                        modifier           = Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp))
                     )
                 } else {
                     Text(
                         name.firstOrNull()?.toString()?.uppercase() ?: "?",
-                        fontSize = 14.sp,
+                        fontSize   = 20.sp,
                         fontWeight = FontWeight.ExtraBold,
-                        color = DarkBg
+                        color      = DarkBg
                     )
                 }
-            }
-            Spacer(Modifier.width(8.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    shortName,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = overlayText,
-                    maxLines = 1
-                )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
+
+                // Live dot badge — top-right corner
+                if (isLive) {
                     Box(
-                        Modifier
-                            .size(6.dp)
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .offset(x = 3.dp, y = (-3).dp)
+                            .size(10.dp)
                             .clip(CircleShape)
-                            .background(if (isLive) GreenOnline else overlayMuted)
-                    )
-                    Text(
-                        if (isLive) {
-                            if (speedKmh > 0.5f) "%.0f km/h".format(speedKmh) else "Live"
-                        } else "Offline",
-                        fontSize = 10.sp,
-                        color = if (isLive) GreenOnline else overlayMuted,
-                        fontWeight = FontWeight.SemiBold
+                            .background(GreenOnline)
+                            .border(1.5.dp, overlayBg, CircleShape)
                     )
                 }
             }
-            // Tap-to-focus indicator
-            Text("📍", fontSize = 10.sp)
+
+            // Name
+            Text(
+                text       = shortName,
+                fontSize   = 9.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color      = overlayText,
+                maxLines   = 1,
+                textAlign  = TextAlign.Center
+            )
+
+            // Speed / status
+            Text(
+                text       = when {
+                    isLive && speedKmh > 0.5f -> "%.0f km/h".format(speedKmh)
+                    isLive                    -> "Live"
+                    else                      -> "Offline"
+                },
+                fontSize   = 8.sp,
+                color      = if (isLive) color else overlayMuted,
+                fontWeight = FontWeight.SemiBold,
+                textAlign  = TextAlign.Center
+            )
+        }
+    }
+}
+
+// Keep the old FriendMapChip for any legacy usage (not used by MapScreen anymore)
+@Composable
+fun FriendMapChip(
+    name: String,
+    avatarBase64: String,
+    color: Color,
+    isLive: Boolean,
+    speedKmh: Float,
+    overlayBg: Color,
+    overlayBorder: Color,
+    overlayText: Color,
+    overlayMuted: Color,
+    onTap: () -> Unit
+) {
+    val bitmap    = remember(avatarBase64) { base64ToBitmap(avatarBase64) }
+    val shortName = name.split(" ").first().take(10)
+
+    Surface(
+        modifier        = Modifier.clickable { onTap() },
+        shape           = RoundedCornerShape(24.dp),
+        color           = overlayBg,
+        shadowElevation = 4.dp,
+        border          = androidx.compose.foundation.BorderStroke(
+            1.5.dp,
+            if (isLive) color.copy(alpha = 0.8f) else overlayBorder
+        )
+    ) {
+        Row(
+            Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier.size(30.dp).clip(CircleShape)
+                    .background(
+                        if (bitmap != null) Brush.linearGradient(listOf(color.copy(0.2f), color.copy(0.2f)))
+                        else Brush.linearGradient(listOf(color.copy(0.7f), color))
+                    )
+                    .border(1.5.dp, color, CircleShape),
+                Alignment.Center
+            ) {
+                if (bitmap != null) {
+                    androidx.compose.foundation.Image(
+                        bitmap = bitmap.asImageBitmap(), contentDescription = null,
+                        contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize().clip(CircleShape)
+                    )
+                } else {
+                    Text(name.firstOrNull()?.toString()?.uppercase() ?: "?", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, color = DarkBg)
+                }
+            }
+            Spacer(Modifier.width(7.dp))
+            Column {
+                Text(shortName, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, color = overlayText, maxLines = 1)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Box(Modifier.size(5.dp).clip(CircleShape).background(if (isLive) GreenOnline else overlayMuted))
+                    Text(
+                        text = if (isLive && speedKmh > 0.5f) "%.0f km/h".format(speedKmh) else if (isLive) "Live" else "Offline",
+                        fontSize = 9.sp, color = if (isLive) GreenOnline else overlayMuted, fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
         }
     }
 }
 
 // ─── Friends Tab ──────────────────────────────────────────────────────────────
+// Added friendAvatars param so cards always get the latest avatar bitmap
 @Composable
 fun FriendsTab(
     savedFriends: List<SavedFriend>, trackedIds: List<String>,
     friendLocations: Map<String, FriendLocation?>,
+    friendAvatars: Map<String, String> = emptyMap(),
     onShowFriendDialog: () -> Unit, onToggleTrack: (String) -> Unit,
     onRemoveSavedFriend: (String) -> Unit, onViewProfile: (SavedFriend) -> Unit,
     onOpenChatWith: (SavedFriend) -> Unit
@@ -1474,18 +1548,34 @@ fun FriendsTab(
                     }
                 }
             } else {
+                // Merge live avatarBase64 from friendAvatars map so profile pic is always current
                 savedFriends.forEach { sf ->
-                    DarkFriendProfileCard(sf = sf, isTracking = sf.trackId in trackedIds, liveLocation = friendLocations[sf.trackId],
-                        onViewProfile = { onViewProfile(sf) }, onToggleTrack = { onToggleTrack(sf.trackId) }, onOpenChat = { onOpenChatWith(sf) })
+                    val latestAvatar = friendAvatars[sf.trackId]?.takeIf { it.isNotBlank() } ?: sf.avatarBase64
+                    val sfWithAvatar = if (latestAvatar != sf.avatarBase64) sf.copy(avatarBase64 = latestAvatar) else sf
+                    DarkFriendProfileCard(
+                        sf = sfWithAvatar,
+                        isTracking = sf.trackId in trackedIds,
+                        liveLocation = friendLocations[sf.trackId],
+                        onViewProfile = { onViewProfile(sfWithAvatar) },
+                        onToggleTrack = { onToggleTrack(sf.trackId) },
+                        onOpenChat = { onOpenChatWith(sfWithAvatar) }
+                    )
                     Spacer(Modifier.height(12.dp))
                 }
                 val untitledTracked = trackedIds.filter { id -> savedFriends.none { it.trackId == id } }
                 if (untitledTracked.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp)); DarkSectionLabel("TRACKING WITHOUT PROFILE"); Spacer(Modifier.height(10.dp))
                     untitledTracked.forEachIndexed { idx, id ->
-                        DarkFriendProfileCard(sf = SavedFriend(trackId = id, displayName = "", email = ""), isTracking = true,
-                            liveLocation = friendLocations[id], onViewProfile = {}, onToggleTrack = { onToggleTrack(id) }, onOpenChat = {},
-                            slotOverride = trackedIds.indexOf(id).takeIf { it >= 0 } ?: idx)
+                        val avatarB64 = friendAvatars[id] ?: ""
+                        DarkFriendProfileCard(
+                            sf = SavedFriend(trackId = id, displayName = "", email = "", avatarBase64 = avatarB64),
+                            isTracking = true,
+                            liveLocation = friendLocations[id],
+                            onViewProfile = {},
+                            onToggleTrack = { onToggleTrack(id) },
+                            onOpenChat = {},
+                            slotOverride = trackedIds.indexOf(id).takeIf { it >= 0 } ?: idx
+                        )
                         Spacer(Modifier.height(12.dp))
                     }
                 }
@@ -1494,13 +1584,13 @@ fun FriendsTab(
     }
 }
 
-// ─── Profile Tab — FIX 1: accept myAvatarVersion to force recompose ───────────
+// ─── Profile Tab ──────────────────────────────────────────────────────────────
 @Composable
 fun ProfileTab(
     user: FirebaseUser, myTrackId: String, trackIdReady: Boolean,
     myLocation: LocationData?, isConnected: Boolean, gpsAvailable: Boolean,
     bgTrackingOn: Boolean, myAvatarBase64: String,
-    myAvatarVersion: Int = 0,  // FIX 1
+    myAvatarVersion: Int = 0,
     onPickProfilePicture: () -> Unit,
     onStartBgTracking: () -> Unit, onStopBgTracking: () -> Unit,
     onStartRecording: () -> Unit, onStopRecording: () -> Unit,
@@ -1508,7 +1598,6 @@ fun ProfileTab(
 ) {
     val ctx = LocalContext.current
     val (accLabel, accColor) = myLocation?.let { accuracyLabel(it.accuracy) } ?: ("—" to TextOnDarkMuted)
-    // FIX 1: key on both base64 and version so bitmap re-decodes immediately after upload
     val myBitmap = remember(myAvatarBase64, myAvatarVersion) { base64ToBitmap(myAvatarBase64) }
 
     Column(Modifier.fillMaxSize().background(DarkBg).verticalScroll(rememberScrollState())) {
@@ -1626,7 +1715,7 @@ fun ProfileTab(
     }
 }
 
-// ─── Dark Friend Profile Card — FIX 3: always show avatar in cards ────────────
+// ─── Dark Friend Profile Card ──────────────────────────────────────────────────
 @Composable
 fun DarkFriendProfileCard(
     sf: SavedFriend, isTracking: Boolean, liveLocation: FriendLocation?,
@@ -1642,10 +1731,11 @@ fun DarkFriendProfileCard(
             when { isLive -> EmeraldGreen.copy(alpha = 0.5f); isTracking -> AmberWarning.copy(alpha = 0.35f); else -> DarkBorderLight })) {
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // FIX 3: Pass avatarBase64 directly from sf — it's always populated now
+                // AvatarCircle uses sf.avatarBase64 which is now always merged with latest
                 AvatarCircle(
                     base64 = sf.avatarBase64,
-                    fallbackInitial = sf.displayName.firstOrNull()?.toString()?.uppercase() ?: sf.trackId.firstOrNull()?.toString() ?: "?",
+                    fallbackInitial = sf.displayName.firstOrNull()?.toString()?.uppercase()
+                        ?: sf.trackId.firstOrNull()?.toString() ?: "?",
                     size = 56, isTracking = isTracking, isLive = isLive
                 )
                 Spacer(Modifier.width(14.dp))
@@ -1804,7 +1894,7 @@ fun UserProfileScreen(
     }
 }
 
-// ─── Friend Dialog — FIX 3: show avatar from lookup result ───────────────────
+// ─── Friend Dialog ────────────────────────────────────────────────────────────
 @Composable
 fun FriendDialog(
     currentIds: List<String>, savedFriends: List<SavedFriend>, myUid: String,
@@ -1838,7 +1928,6 @@ fun FriendDialog(
                         trackId      = resolvedTrackId,
                         displayName  = result.optString("displayName", "").ifBlank { resolvedTrackId },
                         email        = result.optString("email", ""),
-                        // FIX 3: ensure avatarBase64 is captured from lookup so it shows in the card
                         avatarBase64 = result.optString("avatarBase64", "")
                     )
                     lookupState = "found"
@@ -1872,7 +1961,6 @@ fun FriendDialog(
                     Spacer(Modifier.height(14.dp))
                     Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = DarkCardAlt, border = androidx.compose.foundation.BorderStroke(1.dp, EmeraldGreen.copy(alpha = 0.3f))) {
                         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                            // FIX 3: Avatar now shows because avatarBase64 is properly captured above
                             AvatarCircle(
                                 base64 = lookupResult!!.avatarBase64,
                                 fallbackInitial = lookupResult!!.displayName.firstOrNull()?.toString()?.uppercase() ?: "?",
