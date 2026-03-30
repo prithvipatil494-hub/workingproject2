@@ -108,25 +108,25 @@ private fun chatHttpDelete(path: String): Boolean = try {
 
 fun compressImageForChat(ctx: Context, uri: Uri, maxPx: Int = 800, quality: Int = 72): String? {
     return try {
-    val stream = ctx.contentResolver.openInputStream(uri) ?: return null
-    val orig = BitmapFactory.decodeStream(stream)
-    stream.close()
-    if (orig == null) return null
+        val stream = ctx.contentResolver.openInputStream(uri) ?: return null
+        val orig = BitmapFactory.decodeStream(stream)
+        stream.close()
+        if (orig == null) return null
 
-    // Scale down so longest side <= maxPx
-    val scale = if (orig.width > orig.height)
-        minOf(1f, maxPx.toFloat() / orig.width)
-    else
-        minOf(1f, maxPx.toFloat() / orig.height)
+        val scale = if (orig.width > orig.height)
+            minOf(1f, maxPx.toFloat() / orig.width)
+        else
+            minOf(1f, maxPx.toFloat() / orig.height)
 
-    val w = (orig.width * scale).toInt().coerceAtLeast(1)
-    val h = (orig.height * scale).toInt().coerceAtLeast(1)
-    val scaled = Bitmap.createScaledBitmap(orig, w, h, true)
+        val w = (orig.width * scale).toInt().coerceAtLeast(1)
+        val h = (orig.height * scale).toInt().coerceAtLeast(1)
+        val scaled = Bitmap.createScaledBitmap(orig, w, h, true)
 
-    val out = ByteArrayOutputStream()
-    scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)
-    Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-         }catch (_: Exception) { null } }
+        val out = ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)
+        Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+    } catch (_: Exception) { null }
+}
 
 fun compressBitmapForChat(bmp: Bitmap, maxPx: Int = 800, quality: Int = 72): String? = try {
     val scale = if (bmp.width > bmp.height)
@@ -218,6 +218,27 @@ fun formatTimestamp(ts: Long): String {
     return sdf.format(Date(ts))
 }
 
+// ─── Persistent "deleted for me" storage ─────────────────────────────────────
+// Stores per-conversation deleted message IDs in SharedPreferences so they
+// survive app restarts / screen re-opens.
+
+private const val PREF_DELETED_PREFIX = "deleted_for_me_"
+
+private fun loadDeletedForMe(ctx: Context, conversationId: String): Set<String> {
+    val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    val raw   = prefs.getString("$PREF_DELETED_PREFIX$conversationId", null) ?: return emptySet()
+    return try {
+        val arr = JSONArray(raw)
+        (0 until arr.length()).map { arr.getString(it) }.toSet()
+    } catch (_: Exception) { emptySet() }
+}
+
+private fun saveDeletedForMe(ctx: Context, conversationId: String, ids: Set<String>) {
+    val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    val arr   = JSONArray().apply { ids.forEach { put(it) } }
+    prefs.edit().putString("$PREF_DELETED_PREFIX$conversationId", arr.toString()).apply()
+}
+
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 @Composable
@@ -226,6 +247,7 @@ fun ChatEntryPoint(
     myName: String,
     myAvatarBase64: String = "",
     friendAvatars: Map<String, String> = emptyMap(),
+    savedFriends: List<SavedFriend> = emptyList(),      // FIX: added missing param
     trackedIds: List<String>,
     initialChatTrackId: String? = null,
     initialChatName: String? = null,
@@ -233,6 +255,12 @@ fun ChatEntryPoint(
 ) {
     var openConvId   by remember { mutableStateOf<String?>(null) }
     var openFriendId by remember { mutableStateOf<String?>(null) }
+
+    // Resolve display name from savedFriends when opening a conversation
+    fun resolveFriendName(trackId: String): String {
+        return savedFriends.find { it.trackId == trackId }
+            ?.displayName?.ifBlank { trackId } ?: trackId
+    }
 
     LaunchedEffect(myTrackId, initialChatTrackId) {
         if (initialChatTrackId != null) {
@@ -242,19 +270,23 @@ fun ChatEntryPoint(
     }
 
     if (openConvId != null && openFriendId != null) {
+        val friendId   = openFriendId!!
+        val friendName = resolveFriendName(friendId)
         ChatConversationScreen(
             myTrackId      = myTrackId,
             myName         = myName,
-            friendId       = openFriendId!!,
+            friendId       = friendId,
+            friendName     = friendName,
             conversationId = openConvId!!,
             onBack         = { openConvId = null; openFriendId = null }
         )
     } else {
         ChatListScreen(
-            myTrackId  = myTrackId,
-            trackedIds = trackedIds,
-            onOpenConv = { convId, friendId -> openConvId = convId; openFriendId = friendId },
-            onBack     = onBack
+            myTrackId    = myTrackId,
+            trackedIds   = trackedIds,
+            savedFriends = savedFriends,
+            onOpenConv   = { convId, friendId -> openConvId = convId; openFriendId = friendId },
+            onBack       = onBack
         )
     }
 }
@@ -266,6 +298,7 @@ fun ChatEntryPoint(
 fun ChatListScreen(
     myTrackId: String,
     trackedIds: List<String>,
+    savedFriends: List<SavedFriend> = emptyList(),      // FIX: added missing param
     onOpenConv: (String, String) -> Unit,
     onBack: () -> Unit
 ) {
@@ -332,7 +365,17 @@ fun ChatListScreen(
                         val conv        = serverConvs.find { it.conversationId == convId }
                         val unreadCount = conv?.unread?.get(myTrackId) ?: 0
                         val colorIndex  = trackedIds.indexOf(friendId).takeIf { it >= 0 } ?: (friendId.hashCode().and(0x7FFFFFFF) % FriendColors.size)
-                        DarkConversationRow(friendId = friendId, conv = conv, colorIndex = colorIndex, unreadCount = unreadCount, onClick = { onOpenConv(convId, friendId) })
+                        // FIX: resolve display name from savedFriends for the list row
+                        val displayName = savedFriends.find { it.trackId == friendId }
+                            ?.displayName?.ifBlank { friendId } ?: friendId
+                        DarkConversationRow(
+                            friendId    = friendId,
+                            displayName = displayName,
+                            conv        = conv,
+                            colorIndex  = colorIndex,
+                            unreadCount = unreadCount,
+                            onClick     = { onOpenConv(convId, friendId) }
+                        )
                     }
                 }
             }
@@ -345,13 +388,13 @@ fun ChatListScreen(
 @Composable
 private fun DarkConversationRow(
     friendId: String,
+    displayName: String = friendId,
     conv: ChatConversation?,
     colorIndex: Int,
     unreadCount: Int,
     onClick: () -> Unit
 ) {
     val hasUnread = unreadCount > 0
-    // Use "📷 Photo" as preview for image messages
     val preview = conv?.lastMessage?.let {
         if (it == "__image__") "📷 Photo" else it.takeIf { m -> m.isNotEmpty() }
     } ?: "Tap to start chatting"
@@ -362,11 +405,15 @@ private fun DarkConversationRow(
             Box(Modifier.size(50.dp).clip(CircleShape).background(
                 if (hasUnread) Brush.linearGradient(listOf(EmeraldDeep, EmeraldGreen))
                 else Brush.linearGradient(listOf(DarkCardAlt, DarkBorderLight))), Alignment.Center) {
-                Text(friendId.firstOrNull()?.toString()?.uppercase() ?: "?", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = if (hasUnread) DarkBg else TextOnDark)
+                Text(displayName.firstOrNull()?.toString()?.uppercase() ?: "?", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = if (hasUnread) DarkBg else TextOnDark)
             }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
-                Text(friendId, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextOnDark, fontFamily = FontFamily.Monospace)
+                // Show human name on first line, track ID below if different
+                Text(displayName, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextOnDark)
+                if (displayName != friendId) {
+                    Text(friendId, fontSize = 10.sp, color = TextOnDarkMuted, fontFamily = FontFamily.Monospace)
+                }
                 Spacer(Modifier.height(3.dp))
                 Text(preview, fontSize = 12.sp, color = if (hasUnread) EmeraldGreen else TextOnDarkMuted,
                     fontWeight = if (hasUnread) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1)
@@ -384,7 +431,6 @@ private fun DarkConversationRow(
 }
 
 // ─── Image attachment picker state ────────────────────────────────────────────
-
 
 private data class ImageAttachmentState(
     val openGallery: () -> Unit,
@@ -462,7 +508,6 @@ private fun AttachmentSourceDialog(
                 Text("Choose a source", fontSize = 13.sp, color = TextOnDarkMuted)
                 Spacer(Modifier.height(20.dp))
 
-                // Camera option
                 Row(modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(16.dp))
@@ -484,7 +529,6 @@ private fun AttachmentSourceDialog(
 
                 Spacer(Modifier.height(10.dp))
 
-                // Gallery option
                 Row(modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(16.dp))
@@ -546,12 +590,10 @@ private fun ImagePreviewBar(
                 Text("Tap ✓ to send or ✕ to cancel", fontSize = 11.sp, color = TextOnDarkMuted)
             }
             Spacer(Modifier.width(8.dp))
-            // Cancel
             Box(Modifier.size(36.dp).clip(CircleShape).background(DarkCardAlt).clickable { onCancel() }, Alignment.Center) {
                 Text("✕", fontSize = 14.sp, color = TextOnDarkMuted, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.width(8.dp))
-            // Send
             Box(Modifier.size(36.dp).clip(CircleShape).background(Brush.linearGradient(listOf(EmeraldDeep, EmeraldGreen)))
                 .clickable(enabled = !isSending) { onSend() }, Alignment.Center) {
                 if (isSending) CircularProgressIndicator(Modifier.size(18.dp), color = DarkBg, strokeWidth = 2.dp)
@@ -569,16 +611,22 @@ fun ChatConversationScreen(
     myTrackId: String,
     myName: String,
     friendId: String,
+    friendName: String = friendId,          // FIX: added friendly display name param
     conversationId: String,
     onBack: () -> Unit
 ) {
+    val ctx       = LocalContext.current
     val scope     = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
 
     var serverMessages  by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
     var pendingMessages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
-    var deletedForMeIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    // FIX: load deleted-for-me IDs from persistent storage so they survive re-opens
+    var deletedForMeIds by remember {
+        mutableStateOf(loadDeletedForMe(ctx, conversationId))
+    }
 
     val allMessages = remember(serverMessages, pendingMessages, deletedForMeIds) {
         val serverIds = serverMessages.map { it.id }.toSet()
@@ -597,15 +645,12 @@ fun ChatConversationScreen(
     var serverOnline    by remember { mutableStateOf(true) }
     var showClearDialog by remember { mutableStateOf(false) }
 
-    // Image attachment state
     var pendingImageBase64  by remember { mutableStateOf<String?>(null) }
     var showAttachPicker    by remember { mutableStateOf(false) }
 
-    // Long-press menu
     var selectedMsg by remember { mutableStateOf<ChatMessage?>(null) }
     var showMsgMenu by remember { mutableStateOf(false) }
 
-    // Image full-screen viewer
     var viewingImage by remember { mutableStateOf<String?>(null) }
 
     val attachState = rememberImageAttachmentState { base64 ->
@@ -614,9 +659,18 @@ fun ChatConversationScreen(
     val openGallery = attachState.openGallery
     val openCamera  = attachState.openCamera
 
-    // Auto-scroll
+    // FIX: scroll to bottom whenever message count changes, including on first load
     LaunchedEffect(allMessages.size) {
-        if (allMessages.isNotEmpty()) listState.animateScrollToItem(allMessages.size - 1)
+        if (allMessages.isNotEmpty()) {
+            listState.animateScrollToItem(allMessages.size - 1)
+        }
+    }
+
+    // FIX: also scroll to bottom when screen first becomes visible
+    LaunchedEffect(isLoadingMsgs) {
+        if (!isLoadingMsgs && allMessages.isNotEmpty()) {
+            listState.scrollToItem(allMessages.size - 1)
+        }
     }
 
     // Polling + read receipt
@@ -632,7 +686,9 @@ fun ChatConversationScreen(
                 catch (_: Exception) { null }
             }
             if (msgs != null) {
-                serverMessages = msgs; isLoadingMsgs = false; serverOnline = true
+                // FIX: filter out already-deleted-for-me IDs from freshly polled server messages
+                serverMessages = msgs.filter { it.id !in deletedForMeIds }
+                isLoadingMsgs = false; serverOnline = true
                 pendingMessages = pendingMessages.filter { p ->
                     msgs.none { s -> s.senderId == p.senderId && s.text == p.text && kotlin.math.abs(s.timestamp - p.timestamp) < 30_000L }
                 }
@@ -657,7 +713,7 @@ fun ChatConversationScreen(
             val ok = withContext(Dispatchers.IO) {
                 chatHttpPost("/api/chat/send", JSONObject().apply {
                     put("conversationId", conversationId); put("senderId", myTrackId)
-                    put("senderName", myName); put("receiverId", friendId); put("receiverName", friendId)
+                    put("senderName", myName); put("receiverId", friendId); put("receiverName", friendName)
                     put("text", text); put("type", "text")
                 }) != null
             }
@@ -685,7 +741,7 @@ fun ChatConversationScreen(
             val ok = withContext(Dispatchers.IO) {
                 chatHttpPost("/api/chat/send", JSONObject().apply {
                     put("conversationId", conversationId); put("senderId", myTrackId)
-                    put("senderName", myName); put("receiverId", friendId); put("receiverName", friendId)
+                    put("senderName", myName); put("receiverId", friendId); put("receiverName", friendName)
                     put("text", "__image__"); put("type", "image"); put("imageBase64", base64)
                 }) != null
             }
@@ -700,7 +756,9 @@ fun ChatConversationScreen(
     fun clearChat() {
         scope.launch {
             withContext(Dispatchers.IO) { chatHttpDelete("/api/chat/messages/$conversationId") }
-            serverMessages = emptyList(); pendingMessages = emptyList(); deletedForMeIds = emptySet()
+            serverMessages = emptyList(); pendingMessages = emptyList()
+            deletedForMeIds = emptySet()
+            saveDeletedForMe(ctx, conversationId, emptySet())
         }
     }
 
@@ -713,14 +771,20 @@ fun ChatConversationScreen(
                 val msgs = withContext(Dispatchers.IO) {
                     try { chatHttpGetArray("/api/chat/messages/$conversationId")?.let { parseMessages(it) } } catch (_: Exception) { null }
                 }
-                if (msgs != null) serverMessages = msgs
+                if (msgs != null) serverMessages = msgs.filter { it.id !in deletedForMeIds }
             }
         }
     }
 
-    fun deleteForMe(msg: ChatMessage) { deletedForMeIds = deletedForMeIds + msg.id }
+    // FIX: persist deletion so it survives screen re-opens
+    fun deleteForMe(msg: ChatMessage) {
+        val updated = deletedForMeIds + msg.id
+        deletedForMeIds = updated
+        saveDeletedForMe(ctx, conversationId, updated)
+        // Also remove from in-memory server list immediately so it vanishes at once
+        serverMessages = serverMessages.filter { it.id != msg.id }
+    }
 
-    // ─── Attachment picker dialog ─────────────────────────────────────────────
     if (showAttachPicker) {
         AttachmentSourceDialog(
             onGallery = { openGallery() },
@@ -729,12 +793,10 @@ fun ChatConversationScreen(
         )
     }
 
-    // ─── Full-screen image viewer ─────────────────────────────────────────────
     if (viewingImage != null) {
         FullScreenImageViewer(base64 = viewingImage!!, onDismiss = { viewingImage = null })
     }
 
-    // ─── Long-press context menu ──────────────────────────────────────────────
     if (showMsgMenu && selectedMsg != null) {
         val msg = selectedMsg!!
         val isMe = msg.senderId == myTrackId
@@ -764,7 +826,7 @@ fun ChatConversationScreen(
     }
 
     if (showClearDialog) {
-        DarkClearChatDialog(friendId = friendId, onConfirm = { showClearDialog = false; clearChat() }, onDismiss = { showClearDialog = false })
+        DarkClearChatDialog(friendId = friendName, onConfirm = { showClearDialog = false; clearChat() }, onDismiss = { showClearDialog = false })
     }
 
     Scaffold(
@@ -773,11 +835,12 @@ fun ChatConversationScreen(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(36.dp).clip(CircleShape).background(Brush.linearGradient(listOf(EmeraldDeep, EmeraldGreen))), Alignment.Center) {
-                            Text(friendId.firstOrNull()?.toString()?.uppercase() ?: "?", fontSize = 14.sp, fontWeight = FontWeight.ExtraBold, color = DarkBg)
+                            Text(friendName.firstOrNull()?.toString()?.uppercase() ?: "?", fontSize = 14.sp, fontWeight = FontWeight.ExtraBold, color = DarkBg)
                         }
                         Spacer(Modifier.width(10.dp))
                         Column {
-                            Text(friendId, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, color = TextOnDark, fontFamily = FontFamily.Monospace)
+                            // Show human name at top, track ID smaller below
+                            Text(friendName, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, color = TextOnDark)
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Box(Modifier.size(6.dp).clip(CircleShape).background(if (serverOnline) GreenOnline else TextOnDarkMuted))
                                 Text(if (serverOnline) "LiveLoc Chat" else "Reconnecting…", fontSize = 10.sp, color = if (serverOnline) TextOnDarkMuted else AmberWarning)
@@ -798,13 +861,12 @@ fun ChatConversationScreen(
         bottomBar = {
             Surface(color = DarkSurface, shadowElevation = 0.dp, border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorderLight)) {
                 Column {
-                    // Image preview bar (shown when a photo is selected)
                     if (pendingImageBase64 != null) {
                         ImagePreviewBar(
-                            base64   = pendingImageBase64!!,
-                            isSending = isSending,
-                            onSend   = { val b64 = pendingImageBase64!!; pendingImageBase64 = null; sendImageMessage(b64) },
-                            onCancel = { pendingImageBase64 = null }
+                            base64    = pendingImageBase64!!,
+                            isSending  = isSending,
+                            onSend    = { val b64 = pendingImageBase64!!; pendingImageBase64 = null; sendImageMessage(b64) },
+                            onCancel  = { pendingImageBase64 = null }
                         )
                     }
 
@@ -819,8 +881,6 @@ fun ChatConversationScreen(
                     }
 
                     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-
-                        // ── Attachment button ─────────────────────────────────
                         Box(Modifier.size(44.dp).clip(CircleShape)
                             .background(DarkCard)
                             .border(1.dp, DarkBorderLight, RoundedCornerShape(16.dp))
@@ -878,14 +938,19 @@ fun ChatConversationScreen(
                         Spacer(Modifier.height(16.dp))
                         Text("No messages yet", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = TextOnDark)
                         Spacer(Modifier.height(6.dp))
-                        Text("Say hello to $friendId!", fontSize = 13.sp, color = TextOnDarkMuted)
+                        Text("Say hello to ${friendName}!", fontSize = 13.sp, color = TextOnDarkMuted)
                     }
                 }
             }
             else -> {
-                LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(padding),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                // FIX: reversed LazyColumn so newest messages are always visible at the bottom
+                // without needing to scroll manually after every poll
+                LazyColumn(
+                    state           = listState,
+                    modifier        = Modifier.fillMaxSize().padding(padding),
+                    contentPadding  = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     items(allMessages, key = { it.id }) { msg ->
                         DarkMessageBubble(
                             msg         = msg,
@@ -917,7 +982,6 @@ fun FullScreenImageViewer(base64: String, onDismiss: () -> Unit) {
                     modifier = Modifier.fillMaxWidth().heightIn(max = 500.dp)
                 )
             }
-            // Close button overlay
             Box(Modifier.align(Alignment.TopEnd).padding(12.dp).size(36.dp).clip(CircleShape)
                 .background(Color.Black.copy(alpha = 0.6f)).clickable { onDismiss() }, Alignment.Center) {
                 Text("✕", fontSize = 16.sp, color = Color.White, fontWeight = FontWeight.Bold)
@@ -1009,14 +1073,12 @@ private fun ImageBubbleContent(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
-            // Dim overlay for pending
             if (isPending) {
                 Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)), Alignment.Center) {
                     CircularProgressIndicator(Modifier.size(28.dp), color = Color.White, strokeWidth = 2.dp)
                 }
             }
         } else {
-            // Placeholder
             Box(Modifier.size(160.dp, 120.dp).background(DarkCardAlt), Alignment.Center) {
                 if (base64.isBlank()) {
                     CircularProgressIndicator(Modifier.size(24.dp), color = EmeraldGreen, strokeWidth = 2.dp)
@@ -1053,7 +1115,6 @@ fun DarkMessageBubble(
 
         Column(horizontalAlignment = if (isMe) Alignment.End else Alignment.Start, modifier = Modifier.widthIn(max = 280.dp)) {
             if (isImageMsg) {
-                // Image bubble
                 Box(Modifier.then(if (onLongPress != null) Modifier.combinedClickable(onClick = { onImageTap?.invoke(msg.imageBase64) }, onLongClick = { onLongPress() }) else Modifier)) {
                     ImageBubbleContent(
                         base64    = msg.imageBase64,
@@ -1063,7 +1124,6 @@ fun DarkMessageBubble(
                     )
                 }
             } else {
-                // Text bubble
                 Box(
                     Modifier
                         .clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = if (isMe) 18.dp else 4.dp, bottomEnd = if (isMe) 4.dp else 18.dp))
